@@ -767,12 +767,20 @@
           id="open-gift-btn"
           type="button"
           onclick="unwrapGift()"
+          onpointerdown="SoundEngine.unlock()"
           class="open-me-btn relative z-10 rounded-full px-8 py-4 sm:px-10 sm:py-5 text-lg sm:text-xl inline-flex items-center gap-3 cursor-pointer"
         >
-          <span class="text-2xl sm:text-3xl" role="img" aria-label="Gift Box"></span>
+          <span class="text-2xl sm:text-3xl" role="img" aria-label="Gift Box">🎁</span>
           <span>Open Me</span>
         </button>
       </div>
+
+      <!-- Helpful mobile audio reminder -->
+      <p class="text-[11px] sm:text-xs text-pink-200/80 mt-4 font-normal tracking-wide flex items-center justify-center gap-1.5 drop-shadow">
+        <span>🎧</span>
+        <span>Turn volume up & check silent switch for music</span>
+        <span>✨</span>
+      </p>
     </div>
   </div>
 
@@ -1839,22 +1847,40 @@
   <script>
     /* ==========================================
        0. WEB AUDIO API CHILL BGM & SFX ENGINE
-       (All calls wrapped in try/catch so audio can never block UI)
+       (Optimized for Mobile Phone Speakers, iOS Safari & Android Chrome)
        ========================================== */
     const SoundEngine = {
       ctx: null,
+      compressor: null,
       masterGain: null,
       bgmGain: null,
+      sfxGain: null,
       isMuted: false,
-      bgmInterval: null,
+      isBGMPlaying: false,
+      schedulerTimer: null,
+      nextChordTime: 0,
       chordIndex: 0,
+      unlocked: false,
 
-      // Warm dreamy lo-fi Rhodes chord voicings (Fmaj9 -> Em7 -> Dm9 -> Cmaj9)
+      // Rich, warm Lo-Fi Rhodes chord voicings with audible midrange harmonics for mobile phone speakers
+      // Voiced with fundamentals + octaves + extensions so phone speakers project them clearly
       chords: [
-        [174.61, 220.00, 261.63, 329.63, 392.00], // Fmaj9
-        [164.81, 196.00, 246.94, 293.66, 392.00], // Em7
-        [146.83, 174.61, 220.00, 261.63, 329.63], // Dm9
-        [130.81, 164.81, 196.00, 246.94, 293.66]  // Cmaj9
+        {
+          notes: [174.61, 261.63, 349.23, 440.00, 523.25], // Fmaj9
+          bells: [659.25, 783.99]                           // E5, G5 melody chime
+        },
+        {
+          notes: [164.81, 246.94, 329.63, 392.00, 493.88], // Em7
+          bells: [783.99, 987.77]                           // G5, B5 melody chime
+        },
+        {
+          notes: [146.83, 220.00, 293.66, 349.23, 440.00], // Dm9
+          bells: [659.25, 880.00]                           // E5, A5 melody chime
+        },
+        {
+          notes: [130.81, 196.00, 261.63, 329.63, 392.00], // Cmaj9
+          bells: [987.77, 1046.50]                          // B5, C6 melody chime
+        }
       ],
 
       init() {
@@ -1863,14 +1889,33 @@
             const AudioCtx = window.AudioContext || window.webkitAudioContext;
             if (!AudioCtx) return;
             this.ctx = new AudioCtx();
-            this.masterGain = this.ctx.createGain();
-            this.masterGain.gain.value = 0.85;
-            this.masterGain.connect(this.ctx.destination);
 
+            // 1. Hardware Dynamics Compressor: boosts quiet acoustic details on phone speakers & prevents clipping
+            this.compressor = this.ctx.createDynamicsCompressor();
+            this.compressor.threshold.setValueAtTime(-20, this.ctx.currentTime);
+            this.compressor.knee.setValueAtTime(25, this.ctx.currentTime);
+            this.compressor.ratio.setValueAtTime(4.5, this.ctx.currentTime);
+            this.compressor.attack.setValueAtTime(0.003, this.ctx.currentTime);
+            this.compressor.release.setValueAtTime(0.2, this.ctx.currentTime);
+
+            // 2. Master Gain
+            this.masterGain = this.ctx.createGain();
+            this.masterGain.gain.setValueAtTime(this.isMuted ? 0 : 0.95, this.ctx.currentTime);
+
+            // 3. Dedicated BGM Gain (boosted to crisp, audible levels for phones)
             this.bgmGain = this.ctx.createGain();
-            this.bgmGain.gain.value = 0.22;
+            this.bgmGain.gain.setValueAtTime(0.65, this.ctx.currentTime);
+
+            // 4. Dedicated SFX Gain
+            this.sfxGain = this.ctx.createGain();
+            this.sfxGain.gain.setValueAtTime(0.85, this.ctx.currentTime);
+
             this.bgmGain.connect(this.masterGain);
+            this.sfxGain.connect(this.masterGain);
+            this.masterGain.connect(this.compressor);
+            this.compressor.connect(this.ctx.destination);
           }
+
           if (this.ctx && this.ctx.state === 'suspended') {
             this.ctx.resume();
           }
@@ -1879,83 +1924,166 @@
         }
       },
 
-      startChillBGM() {
+      unlock() {
         try {
           this.init();
-          if (!this.ctx || this.bgmInterval) return;
-
-          const playWarmChord = () => {
-            if (this.isMuted || !this.ctx) return;
-            try {
-              const now = this.ctx.currentTime;
-              const freqs = this.chords[this.chordIndex % this.chords.length];
-              this.chordIndex++;
-
-              freqs.forEach((freq, idx) => {
-                const osc = this.ctx.createOscillator();
-                const subOsc = this.ctx.createOscillator();
-                const noteGain = this.ctx.createGain();
-                const filter = this.ctx.createBiquadFilter();
-
-                osc.type = 'sine';
-                subOsc.type = 'triangle';
-                osc.frequency.setValueAtTime(freq, now);
-                subOsc.frequency.setValueAtTime(freq * 2, now);
-
-                // Warm low-pass filter for lo-fi electric piano timbre
-                filter.type = 'lowpass';
-                filter.frequency.setValueAtTime(950, now);
-
-                const stagger = idx * 0.055;
-                noteGain.gain.setValueAtTime(0.0001, now + stagger);
-                noteGain.gain.linearRampToValueAtTime(0.055, now + stagger + 0.35);
-                noteGain.gain.exponentialRampToValueAtTime(0.0008, now + stagger + 3.4);
-
-                const subGain = this.ctx.createGain();
-                subGain.gain.value = 0.12;
-
-                osc.connect(filter);
-                subOsc.connect(subGain);
-                subGain.connect(filter);
-                filter.connect(noteGain);
-                noteGain.connect(this.bgmGain);
-
-                osc.start(now + stagger);
-                subOsc.start(now + stagger);
-                osc.stop(now + stagger + 3.5);
-                subOsc.stop(now + stagger + 3.5);
-              });
-            } catch (err) {
-              console.warn('BGM chord error:', err);
+          if (this.ctx && this.ctx.state === 'suspended') {
+            this.ctx.resume();
+          }
+          if (!this.unlocked) {
+            this.unlocked = true;
+            // Play a 1-sample silent Web Audio buffer
+            if (this.ctx) {
+              const buf = this.ctx.createBuffer(1, 1, 22050);
+              const src = this.ctx.createBufferSource();
+              src.buffer = buf;
+              src.connect(this.ctx.destination);
+              src.start(0);
             }
+            // Trigger an HTML5 audio element play to force iOS Safari to switch audio category to Playback
+            try {
+              const silent = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+              silent.setAttribute('playsinline', '');
+              silent.setAttribute('webkit-playsinline', '');
+              silent.volume = 0.01;
+              const p = silent.play();
+              if (p && typeof p.then === 'function') {
+                p.then(() => { silent.pause(); }).catch(() => {});
+              }
+            } catch (err) {}
+          }
+        } catch (e) {
+          console.warn('Audio unlock warning:', e);
+        }
+      },
+
+      startChillBGM() {
+        try {
+          this.unlock();
+          this.isBGMPlaying = true;
+          if (!this.ctx) return;
+
+          const startLoop = () => {
+            if (!this.ctx) return;
+            if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+            this.nextChordTime = this.ctx.currentTime + 0.08;
+
+            const scheduleCheck = () => {
+              if (!this.isBGMPlaying || !this.ctx) return;
+              if (this.ctx.state === 'suspended') {
+                this.ctx.resume();
+                return;
+              }
+              // Lookahead scheduling: queue chords 1.5s ahead so animations or mobile scrolls never stutter music
+              while (this.nextChordTime < this.ctx.currentTime + 1.5) {
+                if (!this.isMuted) {
+                  this.scheduleWarmChord(this.nextChordTime);
+                }
+                this.nextChordTime += 3.4;
+              }
+            };
+
+            scheduleCheck();
+            this.schedulerTimer = setInterval(scheduleCheck, 250);
           };
 
-          playWarmChord();
-          this.bgmInterval = setInterval(playWarmChord, 3400);
+          if (this.ctx.state === 'suspended') {
+            this.ctx.resume().then(startLoop).catch(startLoop);
+          } else {
+            startLoop();
+          }
         } catch (e) {
           console.warn('startChillBGM warning:', e);
         }
       },
 
+      scheduleWarmChord(startTime) {
+        if (!this.ctx || this.isMuted) return;
+        try {
+          const chordData = this.chords[this.chordIndex % this.chords.length];
+          this.chordIndex++;
+
+          // 1. Play warm Rhodes / Kalimba chord tones
+          chordData.notes.forEach((freq, idx) => {
+            const osc = this.ctx.createOscillator();
+            const subOsc = this.ctx.createOscillator();
+            const noteGain = this.ctx.createGain();
+            const filter = this.ctx.createBiquadFilter();
+
+            osc.type = 'sine';
+            subOsc.type = 'triangle';
+            osc.frequency.setValueAtTime(freq, startTime);
+            subOsc.frequency.setValueAtTime(freq, startTime);
+
+            // 2400Hz cutoff filter gives sparkling, warm presence on phone speakers
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(2400, startTime);
+            filter.Q.setValueAtTime(1.2, startTime);
+
+            const stagger = idx * 0.045;
+            const noteStart = startTime + stagger;
+            noteGain.gain.setValueAtTime(0.0001, noteStart);
+            noteGain.gain.linearRampToValueAtTime(0.18, noteStart + 0.12);
+            noteGain.gain.exponentialRampToValueAtTime(0.0008, noteStart + 3.2);
+
+            const subGain = this.ctx.createGain();
+            subGain.gain.setValueAtTime(0.25, noteStart);
+
+            osc.connect(filter);
+            subOsc.connect(subGain);
+            subGain.connect(filter);
+            filter.connect(noteGain);
+            noteGain.connect(this.bgmGain);
+
+            osc.start(noteStart);
+            subOsc.start(noteStart);
+            osc.stop(noteStart + 3.3);
+            subOsc.stop(noteStart + 3.3);
+          });
+
+          // 2. Play gentle music-box melody bell accents (gives that dreamy lo-fi birthday feel)
+          chordData.bells.forEach((freq, bIdx) => {
+            const bellTime = startTime + 0.8 + bIdx * 0.9;
+            const bellOsc = this.ctx.createOscillator();
+            const bellGain = this.ctx.createGain();
+            bellOsc.type = 'sine';
+            bellOsc.frequency.setValueAtTime(freq, bellTime);
+
+            bellGain.gain.setValueAtTime(0.0001, bellTime);
+            bellGain.gain.linearRampToValueAtTime(0.14, bellTime + 0.04);
+            bellGain.gain.exponentialRampToValueAtTime(0.0005, bellTime + 1.4);
+
+            bellOsc.connect(bellGain);
+            bellGain.connect(this.bgmGain);
+
+            bellOsc.start(bellTime);
+            bellOsc.stop(bellTime + 1.45);
+          });
+        } catch (err) {
+          console.warn('scheduleWarmChord error:', err);
+        }
+      },
+
       playClick() {
         try {
-          this.init();
+          this.unlock();
           if (!this.ctx || this.isMuted) return;
           const now = this.ctx.currentTime;
 
-          // Pleasant dual-tone glassy button pop
-          [587.33, 880].forEach((freq, i) => {
+          // Crisp glassy bubble chime (784Hz + 1046Hz)
+          [783.99, 1046.50].forEach((freq, i) => {
             const osc = this.ctx.createOscillator();
             const gain = this.ctx.createGain();
             osc.type = 'sine';
-            osc.frequency.setValueAtTime(freq, now + i * 0.045);
-            gain.gain.setValueAtTime(0.11, now + i * 0.045);
-            gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.045 + 0.18);
+            const t = now + i * 0.04;
+            osc.frequency.setValueAtTime(freq, t);
+            gain.gain.setValueAtTime(0.28, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
 
             osc.connect(gain);
-            gain.connect(this.masterGain);
-            osc.start(now + i * 0.045);
-            osc.stop(now + i * 0.045 + 0.19);
+            gain.connect(this.sfxGain);
+            osc.start(t);
+            osc.stop(t + 0.17);
           });
         } catch (e) {
           console.warn('playClick warning:', e);
@@ -1964,23 +2092,23 @@
 
       playCardFlip() {
         try {
-          this.init();
+          this.unlock();
           if (!this.ctx || this.isMuted) return;
           const now = this.ctx.currentTime;
           const osc = this.ctx.createOscillator();
           const gain = this.ctx.createGain();
 
           osc.type = 'triangle';
-          osc.frequency.setValueAtTime(320, now);
-          osc.frequency.exponentialRampToValueAtTime(640, now + 0.14);
+          osc.frequency.setValueAtTime(380, now);
+          osc.frequency.exponentialRampToValueAtTime(760, now + 0.13);
 
-          gain.gain.setValueAtTime(0.09, now);
-          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+          gain.gain.setValueAtTime(0.26, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
 
           osc.connect(gain);
-          gain.connect(this.masterGain);
+          gain.connect(this.sfxGain);
           osc.start(now);
-          osc.stop(now + 0.17);
+          osc.stop(now + 0.16);
         } catch (e) {
           console.warn('playCardFlip warning:', e);
         }
@@ -1988,25 +2116,25 @@
 
       playUnwrap() {
         try {
-          this.init();
+          this.unlock();
           if (!this.ctx || this.isMuted) return;
           const now = this.ctx.currentTime;
 
-          // Sparkling harp arpeggio on gift tear
-          const notes = [523.25, 659.25, 783.99, 1046.50, 1318.51];
+          // Sparkling harp arpeggio (C5, E5, G5, B5, C6, E6)
+          const notes = [523.25, 659.25, 783.99, 987.77, 1046.50, 1318.51];
           notes.forEach((freq, idx) => {
             const osc = this.ctx.createOscillator();
             const gain = this.ctx.createGain();
             osc.type = 'sine';
-            const t = now + idx * 0.07;
+            const t = now + idx * 0.065;
             osc.frequency.setValueAtTime(freq, t);
-            gain.gain.setValueAtTime(0.1, t);
-            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+            gain.gain.setValueAtTime(0.32, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
 
             osc.connect(gain);
-            gain.connect(this.masterGain);
+            gain.connect(this.sfxGain);
             osc.start(t);
-            osc.stop(t + 0.56);
+            osc.stop(t + 0.66);
           });
         } catch (e) {
           console.warn('playUnwrap warning:', e);
@@ -2015,7 +2143,7 @@
 
       playFinaleFanfare() {
         try {
-          this.init();
+          this.unlock();
           if (!this.ctx || this.isMuted) return;
           const now = this.ctx.currentTime;
 
@@ -2024,15 +2152,15 @@
             const osc = this.ctx.createOscillator();
             const gain = this.ctx.createGain();
             osc.type = 'triangle';
-            const t = now + idx * 0.085;
+            const t = now + idx * 0.08;
             osc.frequency.setValueAtTime(freq, t);
-            gain.gain.setValueAtTime(0.13, t);
-            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+            gain.gain.setValueAtTime(0.34, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.95);
 
             osc.connect(gain);
-            gain.connect(this.masterGain);
+            gain.connect(this.sfxGain);
             osc.start(t);
-            osc.stop(t + 0.92);
+            osc.stop(t + 0.96);
           });
         } catch (e) {
           console.warn('playFinaleFanfare warning:', e);
@@ -2041,10 +2169,13 @@
 
       toggleMute() {
         try {
-          this.init();
+          this.unlock();
           this.isMuted = !this.isMuted;
           if (this.masterGain && this.ctx) {
-            this.masterGain.gain.setValueAtTime(this.isMuted ? 0 : 0.85, this.ctx.currentTime);
+            this.masterGain.gain.setValueAtTime(this.isMuted ? 0 : 0.95, this.ctx.currentTime);
+          }
+          if (!this.isMuted && !this.isBGMPlaying) {
+            this.startChillBGM();
           }
           return this.isMuted;
         } catch (e) {
@@ -2067,9 +2198,38 @@
         }
       }
       if (statusText) {
-        statusText.textContent = muted ? 'Muted' : 'Chill Beats';
+        statusText.textContent = muted ? 'Muted' : 'Chill Beats 🎵';
       }
     }
+
+    // Global User Interaction Listener: Unlocks Web Audio instantly on the very first touch/click
+    ['touchstart', 'touchend', 'pointerdown', 'click'].forEach((evtType) => {
+      window.addEventListener(
+        evtType,
+        () => {
+          SoundEngine.unlock();
+        },
+        { once: false, passive: true }
+      );
+    });
+
+    // Handle Phone Lock / App Switch / Tab Visibility Changes
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        if (SoundEngine.ctx && SoundEngine.ctx.state === 'suspended') {
+          SoundEngine.ctx.resume();
+        }
+        if (SoundEngine.isBGMPlaying && !SoundEngine.isMuted && SoundEngine.ctx) {
+          SoundEngine.nextChordTime = SoundEngine.ctx.currentTime + 0.1;
+        }
+      }
+    });
+
+    window.addEventListener('focus', () => {
+      if (SoundEngine.ctx && SoundEngine.ctx.state === 'suspended') {
+        SoundEngine.ctx.resume();
+      }
+    });
 
     /* ==========================================
        1. GIFT UNWRAPPING & TEARING SEQUENCE
@@ -2119,8 +2279,9 @@
       if (isGiftUnwrapped) return;
       isGiftUnwrapped = true;
 
-      // Start chill background music & unwrap sound effect safely
+      // Unconditionally unlock audio & start chill background music & unwrap sound effect
       try {
+        SoundEngine.unlock();
         SoundEngine.startChillBGM();
         SoundEngine.playUnwrap();
       } catch (e) {
